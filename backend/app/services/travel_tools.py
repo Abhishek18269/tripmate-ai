@@ -4,11 +4,22 @@ import hashlib
 import math
 from datetime import date
 from typing import Iterable
+from urllib.parse import quote_plus
 
 import httpx
 
 from app.config import Settings
-from app.models.schemas import GeoPoint, Place, RouteSummary, ToolEvent, TransportMode, WeatherSummary
+from app.models.schemas import (
+    AccommodationSuggestion,
+    BookingSuggestion,
+    GeoPoint,
+    Place,
+    RouteSummary,
+    ToolEvent,
+    TransportMode,
+    TripRequest,
+    WeatherSummary,
+)
 
 
 DEMO_COORDINATES: dict[str, tuple[float, float, str]] = {
@@ -29,8 +40,8 @@ def _demo_point(query: str) -> GeoPoint:
             return GeoPoint(lat=lat, lon=lon, label=label, source="TripMate demo dataset", verified=False)
     digest = hashlib.sha256(query.encode("utf-8")).digest()
     return GeoPoint(
-        lat=8 + digest[0] / 255 * 25,
-        lon=68 + digest[1] / 255 * 22,
+        lat=-55 + digest[0] / 255 * 125,
+        lon=-170 + digest[1] / 255 * 340,
         label=f"{query} (demo pin)",
         source="TripMate demo dataset",
         verified=False,
@@ -38,27 +49,63 @@ def _demo_point(query: str) -> GeoPoint:
 
 
 def _demo_places(center: GeoPoint, destination: str) -> list[Place]:
-    is_mysuru = "mys" in destination.casefold()
-    entries = (
-        [
-            ("mysore-palace", "Mysore Palace", "historical", 12.3052, 76.6552, "Landmark", "https://mysorepalace.gov.in/"),
-            ("chamundi-hills", "Chamundi Hills", "nature", 12.2725, 76.6707, "Scenic viewpoint", None),
-            ("jaganmohan-palace", "Jaganmohan Palace", "historical", 12.3086, 76.6514, "Museum", None),
-            ("devaraja-market", "Devaraja Market", "food", 12.3110, 76.6522, "Market and local food", None),
-            ("krs-gardens", "Brindavan Gardens", "family", 12.4218, 76.5730, "Garden", None),
-        ] if is_mysuru else [
-            ("heritage-square", "Heritage Square", "historical", center.lat + .012, center.lon + .009, "Demo heritage stop", None),
-            ("green-garden", "Green Garden", "nature", center.lat - .008, center.lon + .011, "Demo outdoor stop", None),
-            ("local-market", "Local Market", "food", center.lat + .006, center.lon - .009, "Demo food stop", None),
-            ("city-museum", "City Museum", "historical", center.lat - .004, center.lon - .005, "Demo museum", None),
-        ]
-    )
+    # These are intentionally destination-neutral examples used only when live
+    # geocoding or POI search is unavailable; they never masquerade as real venues.
+    entries = [
+        ("heritage-walk", f"{destination} heritage walk", "historical", center.lat + .012, center.lon + .009, "Demo heritage-planning stop", None),
+        ("city-park", f"{destination} city park", "nature", center.lat - .008, center.lon + .011, "Demo outdoor-planning stop", None),
+        ("local-food", f"{destination} local food area", "food", center.lat + .006, center.lon - .009, "Demo local-food planning stop", None),
+        ("city-museum", f"{destination} museum district", "historical", center.lat - .004, center.lon - .005, "Demo museum-planning stop", None),
+    ]
     return [
         Place(
             id=ident, name=name, category=category,
             location=GeoPoint(lat=lat, lon=lon, label=name, source="TripMate demo dataset", verified=False),
             description=description, official_url=url, source="TripMate demo dataset", verified=False,
         ) for ident, name, category, lat, lon, description, url in entries
+    ]
+
+
+def _safe_http_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip()
+    if value.startswith(("https://", "http://")):
+        return value
+    if "://" in value:
+        return None
+    return f"https://{value}"
+
+
+def _maps_search_url(query: str) -> str:
+    return f"https://www.google.com/maps/search/?api=1&query={quote_plus(query)}"
+
+
+def _maps_directions_url(origin: str, destination: str, mode: TransportMode) -> str:
+    travelmode = {TransportMode.car: "driving", TransportMode.walk: "walking", TransportMode.transit: "transit"}.get(mode)
+    mode_part = f"&travelmode={travelmode}" if travelmode else ""
+    return (
+        "https://www.google.com/maps/dir/?api=1"
+        f"&origin={quote_plus(origin)}&destination={quote_plus(destination)}{mode_part}"
+    )
+
+
+def _demo_accommodations(center: GeoPoint, destination: str) -> list[AccommodationSuggestion]:
+    return [
+        AccommodationSuggestion(
+            id="stay-search-hotels", name=f"Hotels in {destination}", kind="hotel search",
+            location=center,
+            description="Compare current prices, accessibility details, cancellation terms, and guest reviews before reserving.",
+            booking_url=_maps_search_url(f"hotels in {destination}"), booking_action="search",
+            source="Google Maps search link", verified=False,
+        ),
+        AccommodationSuggestion(
+            id="stay-search-hostels", name=f"Hostels and guest houses in {destination}", kind="budget stay search",
+            location=center,
+            description="Search local hostels and guest houses; contact the property or a trusted provider to confirm availability.",
+            booking_url=_maps_search_url(f"hostels and guest houses in {destination}"), booking_action="search",
+            source="Google Maps search link", verified=False,
+        ),
     ]
 
 
@@ -76,9 +123,20 @@ class TravelTools:
             return point
         try:
             async with httpx.AsyncClient(timeout=8, headers={"User-Agent": "TripMateAI/1.0 (hackathon demo)"}) as client:
-                response = await client.get(f"{self.settings.nominatim_base_url}/search", params={"q": query, "format": "jsonv2", "limit": 1})
-                response.raise_for_status()
-                data = response.json()
+                params = {"q": query, "format": "jsonv2", "limit": 5, "addressdetails": 1, "accept-language": "en"}
+                # Prefer a settlement when the input names a city or region. A
+                # normal text search can otherwise rank a nearby facility that
+                # merely contains the same word above the actual destination.
+                city_response = await client.get(
+                    f"{self.settings.nominatim_base_url}/search",
+                    params={**params, "featureType": "city"},
+                )
+                city_response.raise_for_status()
+                data = city_response.json()
+                if not data:
+                    response = await client.get(f"{self.settings.nominatim_base_url}/search", params=params)
+                    response.raise_for_status()
+                    data = response.json()
             if not data:
                 raise ValueError("No result")
             item = data[0]
@@ -90,9 +148,15 @@ class TravelTools:
 
     async def nearby_places(self, center: GeoPoint, destination: str) -> list[Place]:
         if self.settings.demo_mode:
-            self.events.append(ToolEvent(tool="places", status="fallback", detail="Demo attraction dataset used; details need verification."))
+            self.events.append(ToolEvent(tool="places", status="fallback", detail="Generic demo attractions used; details need verification."))
             return _demo_places(center, destination)
-        query = f"""[out:json][timeout:12];(nwr(around:8000,{center.lat},{center.lon})[tourism~\"attraction|museum|gallery\"];nwr(around:8000,{center.lat},{center.lon})[historic];nwr(around:8000,{center.lat},{center.lon})[leisure=park];);out center tags 20;"""
+        query = f"""[out:json][timeout:12];(
+          nwr(around:8000,{center.lat},{center.lon})[tourism~\"attraction|museum|gallery|zoo|viewpoint\"];
+          nwr(around:8000,{center.lat},{center.lon})[historic];
+          nwr(around:8000,{center.lat},{center.lon})[leisure~\"park|garden\"];
+          nwr(around:8000,{center.lat},{center.lon})[amenity~\"restaurant|cafe|marketplace\"];
+          nwr(around:8000,{center.lat},{center.lon})[shop~\"mall|department_store\"];
+        );out center tags 40;"""
         try:
             async with httpx.AsyncClient(timeout=18, headers={"User-Agent": "TripMateAI/1.0 (hackathon demo)"}) as client:
                 response = await client.post(self.settings.overpass_url, data={"data": query})
@@ -105,14 +169,21 @@ class TravelTools:
                 loc = element.get("center", element)
                 if not name or "lat" not in loc or "lon" not in loc:
                     continue
-                category = "historical" if tags.get("historic") or tags.get("tourism") in {"museum", "gallery"} else "nature" if tags.get("leisure") == "park" else "attraction"
-                url = tags.get("website") or tags.get("contact:website")
+                category = (
+                    "historical" if tags.get("historic") or tags.get("tourism") in {"museum", "gallery"}
+                    else "nature" if tags.get("leisure") in {"park", "garden"}
+                    else "food" if tags.get("amenity") in {"restaurant", "cafe", "marketplace"}
+                    else "shopping" if tags.get("shop")
+                    else "attraction"
+                )
+                url = _safe_http_url(tags.get("website") or tags.get("contact:website"))
+                booking_url = _safe_http_url(tags.get("booking:website") or tags.get("reservation:website"))
                 places.append(Place(
                     id=f"osm-{element['type']}-{element['id']}", name=name, category=category,
                     location=GeoPoint(lat=float(loc["lat"]), lon=float(loc["lon"]), label=name, source="OpenStreetMap / Overpass", verified=True),
                     description=tags.get("description"), opening_hours=tags.get("opening_hours"),
                     admission_note=("OSM tag: fee=" + tags["fee"]) if "fee" in tags else None,
-                    official_url=url, booking_url=None, source="OpenStreetMap / Overpass", verified=True,
+                    official_url=url, booking_url=booking_url, source="OpenStreetMap / Overpass", verified=True,
                 ))
             if not places:
                 raise ValueError("No usable POIs")
@@ -121,6 +192,71 @@ class TravelTools:
         except Exception:
             self.events.append(ToolEvent(tool="places", status="fallback", detail="Live places lookup failed; demo attractions used and marked unverified."))
             return _demo_places(center, destination)
+
+    async def accommodations(self, center: GeoPoint, destination: str) -> list[AccommodationSuggestion]:
+        if self.settings.demo_mode:
+            self.events.append(ToolEvent(tool="accommodation", status="fallback", detail="Demo stay-search links supplied; availability is not live."))
+            return _demo_accommodations(center, destination)
+        query = f"""[out:json][timeout:12];
+        nwr(around:10000,{center.lat},{center.lon})[tourism~\"hotel|guest_house|hostel|motel|apartment\"];
+        out center tags 12;"""
+        try:
+            async with httpx.AsyncClient(timeout=18, headers={"User-Agent": "TripMateAI/1.0 (hackathon demo)"}) as client:
+                response = await client.post(self.settings.overpass_url, data={"data": query})
+                response.raise_for_status()
+                elements = response.json().get("elements", [])
+            stays: list[AccommodationSuggestion] = []
+            for element in elements:
+                tags = element.get("tags", {})
+                name = tags.get("name")
+                loc = element.get("center", element)
+                if not name or "lat" not in loc or "lon" not in loc:
+                    continue
+                official_url = _safe_http_url(tags.get("website") or tags.get("contact:website"))
+                reservation_url = _safe_http_url(tags.get("booking:website") or tags.get("reservation:website"))
+                stays.append(AccommodationSuggestion(
+                    id=f"osm-stay-{element['type']}-{element['id']}", name=name,
+                    kind=tags.get("tourism", "accommodation").replace("_", " "),
+                    location=GeoPoint(lat=float(loc["lat"]), lon=float(loc["lon"]), label=name, source="OpenStreetMap / Overpass", verified=True),
+                    description="Check the property directly for current rooms, price, accessibility, and cancellation terms.",
+                    official_url=official_url,
+                    booking_url=reservation_url or _maps_search_url(f"{name} {destination}"),
+                    booking_action="official_site" if reservation_url else "search",
+                    source="OpenStreetMap / Overpass", verified=True,
+                ))
+            if not stays:
+                raise ValueError("No usable accommodation POIs")
+            self.events.append(ToolEvent(tool="accommodation", status="ok", detail=f"Found {len(stays)} accommodation options from OpenStreetMap."))
+            return stays
+        except Exception:
+            self.events.append(ToolEvent(tool="accommodation", status="fallback", detail="Live accommodation lookup failed; generic search links supplied instead."))
+            return _demo_accommodations(center, destination)
+
+    def ticket_booking_options(self, request: TripRequest) -> list[BookingSuggestion]:
+        options = [
+            BookingSuggestion(
+                id="route-directions", title="Open route and local transport options", provider="Google Maps",
+                category="travel_search", url=_maps_directions_url(request.origin, request.destination, request.transport_mode),
+                description="Review current route options before choosing a transport provider. This does not check or purchase a ticket.",
+                source="Google Maps URL", verified=True,
+            )
+        ]
+        is_india_trip = request.currency == "INR" or "india" in f"{request.origin} {request.destination}".casefold()
+        if is_india_trip and request.transport_mode in {TransportMode.train, TransportMode.transit}:
+            options.append(BookingSuggestion(
+                id="irctc", title="Search Indian Railways tickets", provider="IRCTC",
+                category="official_ticket", url="https://www.irctc.co.in/nget/train-search",
+                description="Official Indian Railways reservation search. Confirm train availability, fare, and booking conditions on IRCTC before payment.",
+                source="IRCTC official booking site", verified=True,
+            ))
+        if request.transport_mode in {TransportMode.bus, TransportMode.transit, TransportMode.train}:
+            options.append(BookingSuggestion(
+                id="local-operator", title="Find the local transport operator", provider="Google Maps",
+                category="local_operator_search", url=_maps_search_url(f"official bus operator {request.origin} to {request.destination}"),
+                description="Use this search to locate the relevant operator's official reservation channel; schedules and tickets are not available in TripMate.",
+                source="Google Maps search link", verified=True,
+            ))
+        return options
 
     async def route(self, origin: GeoPoint, destination: GeoPoint, mode: TransportMode) -> RouteSummary:
         if self.settings.demo_mode:

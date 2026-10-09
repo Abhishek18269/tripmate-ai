@@ -82,6 +82,32 @@ class CostItem(BaseModel):
     estimated: bool = True
 
 
+class BookingSuggestion(BaseModel):
+    """A hand-off link, never a claim that a ticket is available or purchased."""
+
+    id: str
+    title: str
+    provider: str
+    category: Literal["official_ticket", "travel_search", "local_operator_search"]
+    url: str
+    description: str
+    source: str
+    verified: bool = False
+
+
+class AccommodationSuggestion(BaseModel):
+    id: str
+    name: str
+    kind: str
+    location: GeoPoint
+    description: str
+    official_url: str | None = None
+    booking_url: str | None = None
+    booking_action: Literal["official_site", "search"] = "search"
+    source: str
+    verified: bool = False
+
+
 class ItineraryStop(BaseModel):
     order: int
     place: Place
@@ -126,10 +152,12 @@ class TripPlan(BaseModel):
     cost_items: list[CostItem]
     total_cost: float
     currency: str
+    ticket_booking_options: list[BookingSuggestion] = Field(default_factory=list)
+    accommodation_suggestions: list[AccommodationSuggestion] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     weather: WeatherSummary | None = None
     tool_events: list[ToolEvent] = Field(default_factory=list)
-    ai_mode: Literal["gemma-4", "deterministic-demo"]
+    ai_mode: Literal["gemma-4", "deterministic-tool-plan", "deterministic-demo"]
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

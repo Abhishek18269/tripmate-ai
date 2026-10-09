@@ -18,9 +18,12 @@ class TripPlanningAgent:
         tools = TravelTools(self.settings)
         origin, destination = await asyncio.gather(tools.geocode(request.origin), tools.geocode(request.destination))
         places_task = tools.nearby_places(destination, request.destination)
+        accommodations_task = tools.accommodations(destination, request.destination)
         route_task = tools.route(origin, destination, request.transport_mode)
         weather_task = tools.weather(destination, request.departure_date)
-        candidates, route, weather = await asyncio.gather(places_task, route_task, weather_task)
+        candidates, accommodations, route, weather = await asyncio.gather(
+            places_task, accommodations_task, route_task, weather_task
+        )
 
         if replan_context:
             candidates = [p for p in candidates if p.id not in set(replan_context.unavailable_place_ids)]
@@ -50,7 +53,7 @@ class TripPlanningAgent:
             if replan_context.unavailable_place_ids:
                 warnings.append("Unavailable stops were removed before the new itinerary was generated.")
 
-        ai_mode = "gemma-4" if selected_ids else "deterministic-demo"
+        ai_mode = "gemma-4" if selected_ids else ("deterministic-demo" if self.settings.demo_mode else "deterministic-tool-plan")
         if self.settings.demo_mode:
             warnings.insert(0, "Demo mode is on: maps, routes, places, and costs marked as demo are not live travel data.")
         return TripPlan(
@@ -60,6 +63,8 @@ class TripPlanningAgent:
             request=request, origin=origin, destination=destination,
             itinerary=itinerary,
             route=route, cost_items=costs, total_cost=total_cost, currency=request.currency,
+            ticket_booking_options=tools.ticket_booking_options(request),
+            accommodation_suggestions=accommodations,
             warnings=warnings, weather=weather, tool_events=tools.events, ai_mode=ai_mode,
         )
 

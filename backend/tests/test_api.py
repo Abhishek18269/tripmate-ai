@@ -1,4 +1,6 @@
-from datetime import date
+import os
+
+os.environ["TRIPMATE_DEMO_MODE"] = "true"
 
 from fastapi.testclient import TestClient
 
@@ -14,7 +16,7 @@ PAYLOAD = {
     "budget": 3000,
     "currency": "INR",
     "preferences": ["historical"],
-    "transport_mode": "car",
+    "transport_mode": "train",
     "preferred_start_time": "07:00",
     "preferred_return_time": "21:00",
 }
@@ -32,6 +34,9 @@ def test_health_and_trip_lifecycle():
         assert trip["total_cost"] > 0
         assert trip["route"]["distance_km"] is not None
         assert trip["itinerary"][0]["stops"]
+        assert trip["ticket_booking_options"]
+        assert trip["accommodation_suggestions"]
+        assert any(option["provider"] == "IRCTC" for option in trip["ticket_booking_options"])
         assert "Demo mode is on" in trip["warnings"][0]
 
         fetched = client.get(f"/api/trips/{trip['id']}")
@@ -50,5 +55,15 @@ def test_request_validation_and_places():
         assert invalid.status_code == 422
         places = client.get("/api/places/search", params={"query": "Mysuru"})
         assert places.status_code == 200
-        assert any(place["name"] == "Mysore Palace" for place in places.json())
+        assert any("Mysuru" in place["name"] for place in places.json())
+
+
+def test_demo_fallback_is_not_tied_to_one_city():
+    payload = {**PAYLOAD, "origin": "Jaipur", "destination": "Jaipur"}
+    with TestClient(app) as client:
+        created = client.post("/api/trips/plan", json=payload)
+        assert created.status_code == 201
+        trip = created.json()
+        assert any("Jaipur" in stop["place"]["name"] for stop in trip["itinerary"][0]["stops"])
+        assert any("Jaipur" in stay["name"] for stay in trip["accommodation_suggestions"])
 

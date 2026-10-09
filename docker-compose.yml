@@ -1,0 +1,14 @@
+services:
+  tripmate:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - tripmate-data:/app/data
+    environment:
+      TRIPMATE_DATABASE_URL: sqlite:////app/data/tripmate.db
+volumes:
+  tripmate-data:
+

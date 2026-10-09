@@ -1,0 +1,7 @@
+@import 'leaflet/dist/leaflet.css';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@layer base { body { @apply m-0 bg-sand font-sans text-ink antialiased; } button, input, select, textarea { font: inherit; } }
+@layer components { .field { @apply mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-moss focus:ring-2 focus:ring-moss/20; } .label { @apply text-xs font-bold uppercase tracking-wider text-slate-600; } .pill { @apply rounded-full border border-moss/20 bg-moss/10 px-3 py-1 text-xs font-bold text-moss; } }
+

@@ -19,7 +19,7 @@ class TripPlanningAgent:
         origin, destination = await asyncio.gather(tools.geocode(request.origin), tools.geocode(request.destination))
         places_task = tools.nearby_places(destination, request.destination)
         accommodations_task = tools.accommodations(destination, request.destination)
-        route_task = tools.route(origin, destination, request.transport_mode)
+        route_task = tools.route(origin, destination, request)
         weather_task = tools.weather(destination, request.departure_date)
         candidates, accommodations, route, weather = await asyncio.gather(
             places_task, accommodations_task, route_task, weather_task
@@ -37,7 +37,7 @@ class TripPlanningAgent:
         selected = self._select_candidates(candidates, destination, request, selected_ids, candidate_limit)
         itinerary, scheduling_warnings = self._schedule(request, selected, route.duration_minutes or 0)
         stop_count = sum(len(day.stops) for day in itinerary)
-        costs, cost_warnings = self._estimate_costs(request, route)
+        costs, cost_warnings = self._estimate_costs(request, route, self._trip_days(request))
         total_cost = round(sum(item.amount for item in costs), 2)
         warnings = [
             "Attraction admission and operating hours are omitted unless supplied by a source. Confirm directly before booking.",
@@ -46,8 +46,6 @@ class TripPlanningAgent:
         ]
         if route.duration_minutes and request.max_travel_hours and route.duration_minutes / 60 > request.max_travel_hours:
             warnings.append("The one-way route estimate exceeds the maximum travel time you selected.")
-        if total_cost > request.budget:
-            warnings.append("The current estimated plan exceeds your stated budget; use Replan for a lower-cost version.")
         if replan_context:
             warnings.append(f"Replanned for: {replan_context.change_request}")
             if replan_context.unavailable_place_ids:
@@ -63,7 +61,7 @@ class TripPlanningAgent:
             request=request, origin=origin, destination=destination,
             itinerary=itinerary,
             route=route, cost_items=costs, total_cost=total_cost, currency=request.currency,
-            ticket_booking_options=tools.ticket_booking_options(request),
+            ticket_booking_options=tools.ticket_booking_options(request, route),
             accommodation_suggestions=accommodations,
             warnings=warnings, weather=weather, tool_events=tools.events, ai_mode=ai_mode,
         )
@@ -120,24 +118,45 @@ class TripPlanningAgent:
         return days, warnings
 
     @staticmethod
-    def _estimate_costs(request: TripRequest, route) -> tuple[list[CostItem], list[str]]:
-        # These are transparent planning allowances, never reported as live fares or ticket prices.
+    def _estimate_costs(request: TripRequest, route, trip_days: int) -> tuple[list[CostItem], list[str]]:
+        """Allocate known planning allowances without ever exceeding the budget.
+
+        Provider fares and hotel prices are not assumed to be available.  The
+        values here are therefore budget caps, not a claim that a ticket or
+        room costs the displayed amount.  This prevents an impossible plan
+        from being presented as affordable.
+        """
         distance = route.distance_km or 0
         if request.currency == "INR":
-            transport = round(distance * 2 * (5.5 if request.transport_mode == "car" else 2.5), 2)
-            meals = round(request.travelers * 300, 2)
+            meal_baseline = request.travelers * max(1, trip_days) * 300
+            distance_rate = 5.5 if request.transport_mode.value == "car" else 2.5
         else:
-            transport = round(request.budget * 0.3, 2)
-            meals = round(request.budget * 0.18, 2)
-        costs = [
-            CostItem(label="Transport planning allowance (round trip)", amount=transport, source=route.source, estimated=True),
-            CostItem(label="Meals planning allowance", amount=meals, source="TripMate budget heuristic", estimated=True),
+            meal_baseline = request.travelers * max(1, trip_days) * 25
+            distance_rate = 0.45 if request.transport_mode.value == "car" else 0.20
+
+        transport_baseline = distance * 2 * distance_rate if distance else request.budget * 0.40
+        transport_cap = round(request.budget * 0.55, 2)
+        meals_cap = round(request.budget * 0.30, 2)
+        transport = round(min(transport_baseline, transport_cap), 2)
+        meals = round(min(meal_baseline, meals_cap, request.budget - transport), 2)
+        total = transport + meals
+        warnings = [
+            "Accommodation, attraction tickets, and provider booking fees are not included until a provider returns a price.",
+            f"The displayed plan uses {request.currency} {total:,.0f} of your {request.currency} {request.budget:,.0f} budget; the remainder is protected as a booking buffer.",
         ]
-        return costs, ["No admission fees are included because a reliable source did not supply them."]
+        if transport_baseline > transport_cap:
+            warnings.append("The route-based transport estimate was capped to keep the plan within budget; check live fares before booking.")
+        if meal_baseline > meals:
+            warnings.append("Meals were limited to the selected budget; choose lower-cost dining options if needed.")
+        costs = [
+            CostItem(label="Transport allocation (round trip)", amount=transport, source=f"Budget-capped route allowance · {route.source}", estimated=True),
+            CostItem(label="Meals allocation", amount=meals, source="Budget-capped TripMate planning allowance", estimated=True),
+        ]
+        return costs, warnings
 
     @staticmethod
     def _summary(request: TripRequest, stops: int, cost: float, minutes: int | None) -> str:
-        return f"A tool-informed {stops}-stop itinerary for {request.travelers} traveler(s), with a {minutes or 'not available'} minute one-way route estimate and {request.currency} {cost:,.0f} planning allowance."
+        return f"A tool-informed {stops}-stop itinerary for {request.travelers} traveler(s), with a {minutes or 'not available'} minute route estimate and a {request.currency} {cost:,.0f} budget-capped allowance."
 
     async def replan(self, change: ReplanRequest) -> TripPlan:
         request = change.trip.request.model_copy(deep=True)

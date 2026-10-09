@@ -29,6 +29,9 @@ class TripRequest(BaseModel):
     max_travel_hours: float | None = Field(default=None, gt=0, le=72)
     preferred_start_time: time = time(8, 0)
     preferred_return_time: time | None = time(21, 0)
+    # Sent by the browser so a timetable request is made for the traveller's
+    # intended local departure time, not the server's time zone.
+    departure_timezone: str | None = Field(default=None, max_length=80)
     optional_stops: list[str] = Field(default_factory=list, max_length=6)
     requirements: str | None = Field(default=None, max_length=600)
     request_text: str | None = Field(default=None, max_length=1800)
@@ -71,6 +74,27 @@ class RouteSummary(BaseModel):
     distance_km: float | None = None
     duration_minutes: int | None = None
     geometry: list[list[float]] = Field(default_factory=list)
+    # Transit details are returned only by a provider that supplied a live
+    # timetable.  They deliberately remain empty when no timetable provider is
+    # configured instead of being guessed from the user's requested start time.
+    transit_segments: list["TransitSegment"] = Field(default_factory=list)
+    fare_amount: float | None = None
+    fare_currency: str | None = None
+    source: str
+    verified: bool = False
+
+
+class TransitSegment(BaseModel):
+    mode: str
+    line: str | None = None
+    vehicle: str | None = None
+    headsign: str | None = None
+    departure_stop: str | None = None
+    arrival_stop: str | None = None
+    departure_time: datetime | None = None
+    arrival_time: datetime | None = None
+    duration_minutes: int | None = None
+    stop_count: int | None = None
     source: str
     verified: bool = False
 

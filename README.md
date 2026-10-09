@@ -54,6 +54,12 @@ Then open `http://localhost:8000`. Do not commit `.env`. To deploy to a cloud pr
 
 `TRIPMATE_DEMO_MODE=false` enables live public data. Set it to `true` for a clearly marked, destination-neutral offline demo. Nominatim, Overpass, OSRM, and Open-Meteo use bounded timeouts and fail back to labelled demo data. Follow each provider's usage policy before production traffic.
 
+### Exact routes and live bus/train schedules
+
+Set `GOOGLE_MAPS_API_KEY` to a Google Cloud key with the **Routes API** enabled to use Google Maps provider route distances, traffic-aware road times, and live public-transit segments (departure/arrival time, stops, line, headsign, and fare when supplied). The app sends the browser's selected local departure time when it is within Google's live transit window. Without the key, car/walking routes use OSRM/OpenStreetMap; rail/transit distances and schedules are intentionally left blank rather than guessed, while Google Maps, IRCTC, and bus-search booking links remain available.
+
+For Railway, add `GOOGLE_MAPS_API_KEY` under the service's Variables, then redeploy. The key is server-only and is never sent to the browser.
+
 To enable Gemma, set `GEMINI_API_KEY` and keep `GEMMA_MODEL=gemma-4-26b-a4b-it`. It uses Google's current `google-genai` request pattern:
 
 ```python

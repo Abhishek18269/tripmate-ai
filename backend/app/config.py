@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", validation_alias=AliasChoices("TRIPMATE_CORS_ORIGINS", "CORS_ORIGINS"))
     gemini_api_key: str | None = Field(default=None, validation_alias=AliasChoices("GEMINI_API_KEY", "TRIPMATE_GEMINI_API_KEY"))
     gemma_model: str = Field(default="gemma-4-26b-a4b-it", validation_alias=AliasChoices("GEMMA_MODEL", "TRIPMATE_GEMMA_MODEL"))
+    # Optional Google Maps Routes API key.  It enables provider-supplied road
+    # distances and bus/train departure and arrival details.  No key means the
+    # app never fabricates a timetable.
+    google_maps_api_key: str | None = Field(default=None, validation_alias=AliasChoices("GOOGLE_MAPS_API_KEY", "TRIPMATE_GOOGLE_MAPS_API_KEY"))
+    google_routes_url: str = Field(default="https://routes.googleapis.com/directions/v2:computeRoutes", validation_alias=AliasChoices("GOOGLE_ROUTES_URL", "TRIPMATE_GOOGLE_ROUTES_URL"))
     nominatim_base_url: str = Field(default="https://nominatim.openstreetmap.org", validation_alias=AliasChoices("NOMINATIM_BASE_URL", "TRIPMATE_NOMINATIM_BASE_URL"))
     overpass_url: str = Field(default="https://overpass-api.de/api/interpreter", validation_alias=AliasChoices("OVERPASS_URL", "TRIPMATE_OVERPASS_URL"))
     osrm_url: str = Field(default="https://router.project-osrm.org", validation_alias=AliasChoices("OSRM_URL", "TRIPMATE_OSRM_URL"))

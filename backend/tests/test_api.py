@@ -32,7 +32,9 @@ def test_health_and_trip_lifecycle():
         assert created.status_code == 201
         trip = created.json()
         assert trip["total_cost"] > 0
+        assert trip["total_cost"] <= PAYLOAD["budget"]
         assert trip["route"]["distance_km"] is not None
+        assert trip["route"]["transit_segments"] == []
         assert trip["itinerary"][0]["stops"]
         assert trip["ticket_booking_options"]
         assert trip["accommodation_suggestions"]

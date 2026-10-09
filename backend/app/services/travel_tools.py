@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import date
-from typing import Iterable
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from urllib.parse import quote_plus
 
 import httpx
@@ -15,6 +16,7 @@ from app.models.schemas import (
     GeoPoint,
     Place,
     RouteSummary,
+    TransitSegment,
     ToolEvent,
     TransportMode,
     TripRequest,
@@ -82,7 +84,13 @@ def _maps_search_url(query: str) -> str:
 
 
 def _maps_directions_url(origin: str, destination: str, mode: TransportMode) -> str:
-    travelmode = {TransportMode.car: "driving", TransportMode.walk: "walking", TransportMode.transit: "transit"}.get(mode)
+    travelmode = {
+        TransportMode.car: "driving",
+        TransportMode.walk: "walking",
+        TransportMode.transit: "transit",
+        TransportMode.train: "transit",
+        TransportMode.bus: "transit",
+    }.get(mode)
     mode_part = f"&travelmode={travelmode}" if travelmode else ""
     return (
         "https://www.google.com/maps/dir/?api=1"
@@ -232,12 +240,18 @@ class TravelTools:
             self.events.append(ToolEvent(tool="accommodation", status="fallback", detail="Live accommodation lookup failed; generic search links supplied instead."))
             return _demo_accommodations(center, destination)
 
-    def ticket_booking_options(self, request: TripRequest) -> list[BookingSuggestion]:
+    def ticket_booking_options(self, request: TripRequest, route: RouteSummary) -> list[BookingSuggestion]:
+        requested_departure = f"{request.departure_date.isoformat()} at {request.preferred_start_time.strftime('%H:%M')}"
+        schedule_status = (
+            f"{len(route.transit_segments)} live provider timetable segment(s) are shown above."
+            if route.transit_segments
+            else f"Requested departure: {requested_departure}. Open the provider to see live departures and seats."
+        )
         options = [
             BookingSuggestion(
-                id="route-directions", title="Open route and local transport options", provider="Google Maps",
+                id="route-directions", title="Open live route options", provider="Google Maps",
                 category="travel_search", url=_maps_directions_url(request.origin, request.destination, request.transport_mode),
-                description="Review current route options before choosing a transport provider. This does not check or purchase a ticket.",
+                description=f"View the current map route and alternatives for {requested_departure}. This does not purchase a ticket.",
                 source="Google Maps URL", verified=True,
             )
         ]
@@ -246,27 +260,47 @@ class TravelTools:
             options.append(BookingSuggestion(
                 id="irctc", title="Search Indian Railways tickets", provider="IRCTC",
                 category="official_ticket", url="https://www.irctc.co.in/nget/train-search",
-                description="Official Indian Railways reservation search. Confirm train availability, fare, and booking conditions on IRCTC before payment.",
+                description=f"Official Indian Railways reservation search. {schedule_status} Confirm availability, fare, class, and booking conditions before payment.",
                 source="IRCTC official booking site", verified=True,
+            ))
+        if is_india_trip and request.transport_mode == TransportMode.bus:
+            options.append(BookingSuggestion(
+                id="redbus", title="Search bus tickets", provider="redBus",
+                category="travel_search", url="https://www.redbus.in/",
+                description=f"Search buses for {request.origin} to {request.destination}. {schedule_status}",
+                source="redBus booking search", verified=True,
             ))
         if request.transport_mode in {TransportMode.bus, TransportMode.transit, TransportMode.train}:
             options.append(BookingSuggestion(
                 id="local-operator", title="Find the local transport operator", provider="Google Maps",
                 category="local_operator_search", url=_maps_search_url(f"official bus operator {request.origin} to {request.destination}"),
-                description="Use this search to locate the relevant operator's official reservation channel; schedules and tickets are not available in TripMate.",
+                description=f"Use this search to locate the relevant operator's reservation channel. {schedule_status}",
                 source="Google Maps search link", verified=True,
             ))
         return options
 
-    async def route(self, origin: GeoPoint, destination: GeoPoint, mode: TransportMode) -> RouteSummary:
+    async def route(self, origin: GeoPoint, destination: GeoPoint, request: TripRequest) -> RouteSummary:
+        mode = request.transport_mode
         if self.settings.demo_mode:
             km = round(_haversine_km(origin, destination) * 1.22, 1)
             minutes = max(25, round(km / (50 if mode in {TransportMode.car, TransportMode.bus} else 65) * 60))
             self.events.append(ToolEvent(tool="route", status="fallback", detail="Demo route estimate used; verify before travelling."))
             return RouteSummary(distance_km=km, duration_minutes=minutes, geometry=[[origin.lat, origin.lon], [destination.lat, destination.lon]], source="TripMate demo estimate", verified=False)
-        if mode not in {TransportMode.car, TransportMode.walk}:
-            self.events.append(ToolEvent(tool="route", status="skipped", detail="Public OSRM adapter only supports driving/walking; no live transit schedule was claimed."))
-            return RouteSummary(source="Unavailable for selected mode", verified=False)
+
+        live_route = await self._google_maps_route(origin, destination, request)
+        if live_route:
+            return live_route
+
+        # Never pass a road distance off as a rail timetable.  A bus can use a
+        # clearly-labelled road fallback; rail and generic transit stay blank
+        # until a schedule provider has supplied actual route data.
+        if mode in {TransportMode.train, TransportMode.transit}:
+            self.events.append(ToolEvent(
+                tool="route", status="skipped",
+                detail="No Google Maps Routes API key is configured, so no train/transit distance or timetable was invented.",
+            ))
+            return RouteSummary(source="Live train/transit route unavailable; open Google Maps for current details", verified=False)
+
         profile = "foot" if mode == TransportMode.walk else "driving"
         try:
             coordinates = f"{origin.lon},{origin.lat};{destination.lon},{destination.lat}"
@@ -275,12 +309,81 @@ class TravelTools:
                 response.raise_for_status()
                 item = response.json()["routes"][0]
             geometry = [[lat, lon] for lon, lat in item["geometry"]["coordinates"]]
-            self.events.append(ToolEvent(tool="route", status="ok", detail="Live OSRM route retrieved."))
-            return RouteSummary(distance_km=round(item["distance"] / 1000, 1), duration_minutes=round(item["duration"] / 60), geometry=geometry, source="OSRM / OpenStreetMap", verified=True)
+            source = "OSRM / OpenStreetMap"
+            verified = True
+            detail = "Live OSRM road route retrieved."
+            if mode == TransportMode.bus:
+                source = "OSRM road distance (not a scheduled bus route)"
+                verified = False
+                detail = "Live road distance retrieved; configure Google Maps Routes API for a bus timetable."
+            self.events.append(ToolEvent(tool="route", status="ok", detail=detail))
+            return RouteSummary(distance_km=round(item["distance"] / 1000, 1), duration_minutes=round(item["duration"] / 60), geometry=geometry, source=source, verified=verified)
         except Exception:
             km = round(_haversine_km(origin, destination) * 1.22, 1)
             self.events.append(ToolEvent(tool="route", status="fallback", detail="Live routing failed; map line and time are unverified estimates."))
             return RouteSummary(distance_km=km, duration_minutes=round(km / 50 * 60), geometry=[[origin.lat, origin.lon], [destination.lat, destination.lon]], source="TripMate fallback estimate", verified=False)
+
+    async def _google_maps_route(self, origin: GeoPoint, destination: GeoPoint, request: TripRequest) -> RouteSummary | None:
+        """Fetch a provider-supplied route and timetable when a project key exists."""
+        api_key = (self.settings.google_maps_api_key or "").strip()
+        if not api_key:
+            return None
+
+        mode = request.transport_mode
+        travel_mode = {
+            TransportMode.car: "DRIVE", TransportMode.walk: "WALK", TransportMode.bus: "TRANSIT",
+            TransportMode.train: "TRANSIT", TransportMode.transit: "TRANSIT",
+        }[mode]
+        payload: dict[str, Any] = {
+            "origin": {"location": {"latLng": {"latitude": origin.lat, "longitude": origin.lon}}},
+            "destination": {"location": {"latLng": {"latitude": destination.lat, "longitude": destination.lon}}},
+            "travelMode": travel_mode,
+            "units": "METRIC",
+        }
+        departure_time = _requested_departure_timestamp(request)
+        if departure_time:
+            payload["departureTime"] = departure_time
+        if travel_mode == "DRIVE":
+            payload["routingPreference"] = "TRAFFIC_AWARE"
+        if mode == TransportMode.bus:
+            payload["transitPreferences"] = {"allowedTravelModes": ["BUS"]}
+        elif mode == TransportMode.train:
+            payload["transitPreferences"] = {"allowedTravelModes": ["TRAIN"]}
+
+        field_mask = ",".join([
+            "routes.distanceMeters", "routes.duration", "routes.polyline.encodedPolyline", "routes.travelAdvisory.transitFare",
+            "routes.legs.steps.travelMode", "routes.legs.steps.staticDuration", "routes.legs.steps.transitDetails.stopCount",
+            "routes.legs.steps.transitDetails.headsign", "routes.legs.steps.transitDetails.departureTime",
+            "routes.legs.steps.transitDetails.arrivalTime", "routes.legs.steps.transitDetails.departureStop.name",
+            "routes.legs.steps.transitDetails.arrivalStop.name", "routes.legs.steps.transitDetails.transitLine.name",
+            "routes.legs.steps.transitDetails.transitLine.nameShort", "routes.legs.steps.transitDetails.transitLine.vehicle.type",
+        ])
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.post(
+                    self.settings.google_routes_url,
+                    headers={"X-Goog-Api-Key": api_key, "X-Goog-FieldMask": field_mask}, json=payload,
+                )
+                response.raise_for_status()
+                routes = response.json().get("routes", [])
+            if not routes:
+                raise ValueError("No route returned")
+            item = routes[0]
+            encoded = item.get("polyline", {}).get("encodedPolyline")
+            geometry = _decode_google_polyline(encoded) if encoded else []
+            segments = _transit_segments_from_google_route(item)
+            fare_amount, fare_currency = _google_transit_fare(item)
+            route_kind = "timetable" if travel_mode == "TRANSIT" else "route"
+            self.events.append(ToolEvent(tool="route", status="ok", detail=f"Google Maps Routes API returned a live {route_kind}."))
+            return RouteSummary(
+                distance_km=round(float(item.get("distanceMeters", 0)) / 1000, 1) if item.get("distanceMeters") is not None else None,
+                duration_minutes=_duration_minutes(item.get("duration")), geometry=geometry,
+                transit_segments=segments, fare_amount=fare_amount, fare_currency=fare_currency,
+                source="Google Maps Routes API", verified=True,
+            )
+        except Exception:
+            self.events.append(ToolEvent(tool="route", status="failed", detail="Google Maps route lookup failed; a live route or timetable is not being claimed."))
+            return None
 
     async def weather(self, point: GeoPoint, trip_date: date) -> WeatherSummary | None:
         if self.settings.demo_mode:
@@ -298,6 +401,104 @@ class TravelTools:
         except Exception:
             self.events.append(ToolEvent(tool="weather", status="failed", detail="Weather lookup failed; no forecast is being shown."))
             return None
+
+
+def _requested_departure_timestamp(request: TripRequest) -> str | None:
+    """Convert the browser's intended local departure to a Routes API timestamp.
+
+    Google only exposes future transit data for a limited window.  When the
+    date is outside that window, omitting this field is more honest than
+    silently asking for a different date.
+    """
+    try:
+        timezone = ZoneInfo(request.departure_timezone or "UTC")
+    except ZoneInfoNotFoundError:
+        timezone = UTC
+    local_departure = datetime.combine(request.departure_date, request.preferred_start_time, tzinfo=timezone)
+    departure_utc = local_departure.astimezone(UTC)
+    now = datetime.now(UTC)
+    if now <= departure_utc <= now + timedelta(days=100):
+        return departure_utc.isoformat().replace("+00:00", "Z")
+    return None
+
+
+def _duration_minutes(value: str | None) -> int | None:
+    if not value or not value.endswith("s"):
+        return None
+    try:
+        return max(1, round(float(value[:-1]) / 60))
+    except ValueError:
+        return None
+
+
+def _parse_google_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _transit_segments_from_google_route(route: dict[str, Any]) -> list[TransitSegment]:
+    segments: list[TransitSegment] = []
+    for leg in route.get("legs", []):
+        for step in leg.get("steps", []):
+            details = step.get("transitDetails")
+            if not details:
+                continue
+            line = details.get("transitLine") or {}
+            vehicle = line.get("vehicle") or {}
+            departure_stop = details.get("departureStop") or {}
+            arrival_stop = details.get("arrivalStop") or {}
+            segments.append(TransitSegment(
+                mode=vehicle.get("type") or step.get("travelMode", "TRANSIT"),
+                line=line.get("nameShort") or line.get("name"),
+                vehicle=vehicle.get("type"), headsign=details.get("headsign"),
+                departure_stop=departure_stop.get("name"), arrival_stop=arrival_stop.get("name"),
+                departure_time=_parse_google_time(details.get("departureTime")),
+                arrival_time=_parse_google_time(details.get("arrivalTime")),
+                duration_minutes=_duration_minutes(step.get("staticDuration")),
+                stop_count=details.get("stopCount"), source="Google Maps Routes API", verified=True,
+            ))
+    return segments
+
+
+def _google_transit_fare(route: dict[str, Any]) -> tuple[float | None, str | None]:
+    fare = (route.get("travelAdvisory") or {}).get("transitFare") or {}
+    if not fare:
+        return None, None
+    try:
+        amount = float(fare.get("units", 0)) + float(fare.get("nanos", 0)) / 1_000_000_000
+    except (TypeError, ValueError):
+        return None, None
+    return round(amount, 2), fare.get("currencyCode")
+
+
+def _decode_google_polyline(encoded: str) -> list[list[float]]:
+    """Decode a Google encoded polyline into Leaflet's [lat, lon] points."""
+    points: list[list[float]] = []
+    index = lat = lon = 0
+    length = len(encoded)
+    try:
+        while index < length:
+            values: list[int] = []
+            for _ in range(2):
+                result = shift = 0
+                while True:
+                    byte = ord(encoded[index]) - 63
+                    index += 1
+                    result |= (byte & 0x1F) << shift
+                    shift += 5
+                    if byte < 0x20:
+                        break
+                values.append(~(result >> 1) if result & 1 else result >> 1)
+            lat += values[0]
+            lon += values[1]
+            points.append([lat / 100000, lon / 100000])
+    except (IndexError, ValueError):
+        return []
+    return points
 
 
 def _haversine_km(a: GeoPoint, b: GeoPoint) -> float:

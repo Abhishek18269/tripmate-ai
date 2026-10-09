@@ -8,7 +8,7 @@ TripMate AI is a tool-first travel-planning agent for Hacktoberfest Hack Day. It
 - FastAPI API with Pydantic validation, documented endpoints at `/docs`, and SQLite persistence.
 - Agent workflow: geocode → fetch places → fetch route/weather → constrained stop selection → time/budget checks → structured itinerary.
 - Optional hosted **Gemma 4** integration. The verified [Gemini API provider](https://ai.google.dev/gemma/docs/core/gemma_on_gemini_api) uses `google-genai` and `gemma-4-26b-a4b-it` (or `gemma-4-31b-it`). Gemma is strictly constrained to select IDs from tool-returned candidates; it cannot invent routes, prices, opening hours, or booking availability.
-- Honest demo mode, enabled by default. Every demo/fallback result is visible in the tool trace and warnings.
+- Live worldwide public-data lookups are enabled by default. An honest demo mode is also available; every demo/fallback result is visible in the tool trace and warnings.
 
 ```text
 React + Leaflet  ──► FastAPI planning agent ──► Gemma 4 (optional, constrained)
@@ -52,7 +52,7 @@ Then open `http://localhost:8000`. Do not commit `.env`. To deploy to a cloud pr
 
 ## Configuration
 
-`TRIPMATE_DEMO_MODE=true` needs no keys and serves clearly marked sample data. For live public data set it to `false`; Nominatim, Overpass, OSRM, and Open-Meteo are used with bounded timeouts and fail back to labelled demo data. Follow each provider's usage policy before production traffic.
+`TRIPMATE_DEMO_MODE=false` enables live public data. Set it to `true` for a clearly marked, destination-neutral offline demo. Nominatim, Overpass, OSRM, and Open-Meteo use bounded timeouts and fail back to labelled demo data. Follow each provider's usage policy before production traffic.
 
 To enable Gemma, set `GEMINI_API_KEY` and keep `GEMMA_MODEL=gemma-4-26b-a4b-it`. It uses Google's current `google-genai` request pattern:
 

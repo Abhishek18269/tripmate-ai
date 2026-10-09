@@ -154,7 +154,7 @@ class TravelTools:
             self.events.append(ToolEvent(tool="geocode", status="fallback", detail=f"Live geocoding failed for {query}; a clearly marked demo coordinate was used."))
             return _demo_point(query)
 
-    async def nearby_places(self, center: GeoPoint, destination: str) -> list[Place]:
+    async def nearby_places(self, center: GeoPoint, destination: str, interests: Iterable[str] = ()) -> list[Place]:
         if self.settings.demo_mode:
             self.events.append(ToolEvent(tool="places", status="fallback", detail="Generic demo attractions used; details need verification."))
             return _demo_places(center, destination)
@@ -162,8 +162,6 @@ class TravelTools:
           nwr(around:8000,{center.lat},{center.lon})[tourism~\"attraction|museum|gallery|zoo|viewpoint\"];
           nwr(around:8000,{center.lat},{center.lon})[historic];
           nwr(around:8000,{center.lat},{center.lon})[leisure~\"park|garden\"];
-          nwr(around:8000,{center.lat},{center.lon})[amenity~\"restaurant|cafe|marketplace\"];
-          nwr(around:8000,{center.lat},{center.lon})[shop~\"mall|department_store\"];
         );out center tags 40;"""
         try:
             async with httpx.AsyncClient(timeout=18, headers={"User-Agent": "TripMateAI/1.0 (hackathon demo)"}) as client:
@@ -198,8 +196,64 @@ class TravelTools:
             self.events.append(ToolEvent(tool="places", status="ok", detail=f"Found {len(places)} OpenStreetMap attractions."))
             return places
         except Exception:
+            # Overpass can be temporarily rate-limited.  Use Nominatim's
+            # indexed OSM search before resorting to generic demo stops, so a
+            # traveller still receives actual destination places to visit.
+            places = await self._nominatim_places(destination, interests)
+            if places:
+                self.events.append(ToolEvent(tool="places", status="ok", detail=f"Overpass was unavailable; found {len(places)} destination places through OpenStreetMap Nominatim."))
+                return places
             self.events.append(ToolEvent(tool="places", status="fallback", detail="Live places lookup failed; demo attractions used and marked unverified."))
             return _demo_places(center, destination)
+
+    async def _nominatim_places(self, destination: str, interests: Iterable[str]) -> list[Place]:
+        """Small live POI fallback for temporary Overpass outages."""
+        interest_text = " ".join(interests).casefold()
+        if any(token in interest_text for token in ("historical", "history", "museum", "heritage")):
+            search_term = "museums"
+        elif any(token in interest_text for token in ("nature", "park", "garden", "outdoor")):
+            search_term = "parks"
+        elif any(token in interest_text for token in ("food", "restaurant", "cafe")):
+            search_term = "restaurants"
+        elif "shopping" in interest_text:
+            search_term = "shopping"
+        else:
+            search_term = "attractions"
+        try:
+            async with httpx.AsyncClient(timeout=10, headers={"User-Agent": "TripMateAI/1.0 (hackathon demo)"}) as client:
+                response = await client.get(
+                    f"{self.settings.nominatim_base_url}/search",
+                    params={"q": f"{search_term} in {destination}", "format": "jsonv2", "limit": 12, "addressdetails": 1, "accept-language": "en"},
+                )
+                response.raise_for_status()
+                results = response.json()
+            places: list[Place] = []
+            seen_names: set[str] = set()
+            for item in results:
+                name = item.get("name") or item.get("display_name", "").split(",")[0].strip()
+                if not name or "lat" not in item or "lon" not in item:
+                    continue
+                normalized_name = name.casefold().strip()
+                if normalized_name in seen_names:
+                    continue
+                seen_names.add(normalized_name)
+                place_type = (item.get("type") or "attraction").casefold()
+                category = (
+                    "historical" if place_type in {"museum", "gallery", "monument", "memorial"}
+                    else "nature" if place_type in {"park", "garden", "zoo"}
+                    else "attraction"
+                )
+                osm_type, osm_id = item.get("osm_type"), item.get("osm_id")
+                map_url = f"https://www.openstreetmap.org/{osm_type}/{osm_id}" if osm_type and osm_id else None
+                places.append(Place(
+                    id=f"nominatim-{osm_type or 'place'}-{osm_id or len(places)}", name=name, category=category,
+                    location=GeoPoint(lat=float(item["lat"]), lon=float(item["lon"]), label=name, source="OpenStreetMap Nominatim", verified=True),
+                    description=item.get("display_name"), official_url=map_url,
+                    source="OpenStreetMap Nominatim", verified=True,
+                ))
+            return places
+        except Exception:
+            return []
 
     async def accommodations(self, center: GeoPoint, destination: str) -> list[AccommodationSuggestion]:
         if self.settings.demo_mode:

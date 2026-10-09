@@ -17,7 +17,7 @@ class TripPlanningAgent:
     async def plan(self, request: TripRequest, replan_context: ReplanRequest | None = None) -> TripPlan:
         tools = TravelTools(self.settings)
         origin, destination = await asyncio.gather(tools.geocode(request.origin), tools.geocode(request.destination))
-        places_task = tools.nearby_places(destination, request.destination)
+        places_task = tools.nearby_places(destination, request.destination, request.preferences)
         accommodations_task = tools.accommodations(destination, request.destination)
         route_task = tools.route(origin, destination, request)
         weather_task = tools.weather(destination, request.departure_date)
@@ -76,9 +76,48 @@ class TripPlanningAgent:
             lookup = {place.id: place for place in candidates}
             chosen = [lookup[ident] for ident in selected_ids if ident in lookup]
         else:
-            interests = " ".join([*request.preferences, *request.optional_stops, request.requirements or ""]).casefold()
-            matching = [place for place in candidates if place.category.casefold() in interests or place.name.casefold() in interests]
-            chosen = matching + [place for place in candidates if place not in matching]
+            # Public OSM results have no relevance ordering.  Selecting the
+            # first matching results could therefore create an itinerary made
+            # entirely of nearby cafes even when the traveller asked for
+            # heritage or nature.  Select a varied set of sights first, then
+            # add one dining stop only when food was requested.
+            text = " ".join([*request.preferences, *request.optional_stops, request.requirements or ""]).casefold()
+            requested = []
+            category_aliases = {
+                "historical": "historical", "history": "historical", "museum": "historical",
+                "nature": "nature", "outdoor": "nature", "adventure": "attraction",
+                "food": "food", "restaurant": "food", "shopping": "shopping",
+                "family-friendly": "attraction", "family": "attraction",
+            }
+            for token, category in category_aliases.items():
+                if token in text and category not in requested:
+                    requested.append(category)
+
+            # Attractions are worthwhile defaults when the requested category
+            # is sparse.  Food is deliberately last and is limited to one.
+            priority = [category for category in requested if category != "food"]
+            for category in ("historical", "nature", "attraction", "shopping"):
+                if category not in priority:
+                    priority.append(category)
+            if "food" in requested:
+                priority.append("food")
+
+            pools = {
+                category: distance_ordered(
+                    [place for place in candidates if place.category.casefold() == category], anchor
+                ) for category in priority
+            }
+            chosen = []
+            # First take one nearby place from each suitable category for a
+            # balanced itinerary, then fill unused capacity with more sights.
+            for category in priority:
+                if pools[category] and len(chosen) < limit:
+                    chosen.append(pools[category].pop(0))
+            for category in [item for item in priority if item != "food"] + (["food"] if "food" in requested else []):
+                while pools[category] and len(chosen) < limit:
+                    chosen.append(pools[category].pop(0))
+            if not chosen:
+                chosen = distance_ordered(candidates, anchor)[:limit]
         return distance_ordered(chosen[:limit], anchor)
 
     def _schedule(self, request: TripRequest, selected, one_way_minutes: int) -> tuple[list[ItineraryDay], list[str]]:

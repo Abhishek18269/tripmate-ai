@@ -1,6 +1,6 @@
-import { FormEvent, ReactNode, useState } from 'react'
+import { FormEvent, ReactNode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { MapContainer, Marker, Polyline, Popup, TileLayer } from 'react-leaflet'
+import { MapContainer, Marker, Polyline, Popup, TileLayer, useMap } from 'react-leaflet'
 import { planTrip, replanTrip } from './api'
 import type { TripPlan, TripRequest } from './types'
 import './index.css'
@@ -86,21 +86,32 @@ function App() {
 
 function Field({ label, children }: { label: string; children: ReactNode }) { return <label><span className="label">{label}</span>{children}</label> }
 
+function RouteViewport({ positions, fallback }: { positions: [number, number][]; fallback: [number, number] }) {
+  const map = useMap()
+  useEffect(() => {
+    if (positions.length > 1) map.fitBounds(positions, { padding: [28, 28], maxZoom: 11 })
+    else map.setView(fallback, 11)
+  }, [map, positions, fallback])
+  return null
+}
+
 function Results({ trip, loading, change, setChange, replan }: { trip: TripPlan; loading: boolean; change: string; setChange: (value: string) => void; replan: () => void }) {
   const day = trip.itinerary[0]
-  const positions = trip.route.geometry.length ? trip.route.geometry : day.stops.map(stop => [stop.place.location.lat, stop.place.location.lon])
+  const stopPositions = trip.itinerary.flatMap(item => item.stops.map(stop => [stop.place.location.lat, stop.place.location.lon] as [number, number]))
+  const positions = (trip.route.geometry.length ? trip.route.geometry : stopPositions) as [number, number][]
   const center: [number, number] = [trip.destination.lat, trip.destination.lon]
   const budgetRemaining = Math.max(0, trip.request.budget - trip.total_cost)
   return <section id="itinerary" className="mx-auto max-w-6xl px-5 py-14">
     <div className="mb-7 flex flex-wrap items-end justify-between gap-3"><div><p className="pill">{trip.ai_mode === 'gemma-4' ? 'Gemma 4 assisted' : trip.ai_mode === 'deterministic-demo' ? 'Demo plan' : 'Tool-based plan'}</p><h2 className="mt-3 text-3xl font-black">{trip.title}</h2><p className="mt-2 max-w-2xl text-slate-600">{trip.summary}</p></div><button onClick={() => window.print()} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold">Print plan</button></div>
     <div className="grid gap-5 lg:grid-cols-[1.05fr_.95fr]">
       <div className="space-y-5">
-        <div className="grid grid-cols-3 gap-3">{[[trip.route.distance_km !== undefined ? `${trip.route.distance_km} km` : 'Open map', 'one way'], [trip.route.duration_minutes !== undefined ? `${trip.route.duration_minutes} min` : 'Check provider', 'route time'], [`${trip.currency} ${budgetRemaining.toLocaleString()}`, 'budget remaining']].map(([value, label]) => <div key={label} className="rounded-2xl bg-ink p-4 text-white"><div className="text-lg font-black">{value}</div><div className="mt-1 text-xs text-white/65">{label}</div></div>)}</div>
-        <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"><div className="h-[340px]">{positions.length > 0 && <MapContainer center={center} zoom={11} className="h-full w-full" scrollWheelZoom={false}><TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />{positions.length > 1 && <Polyline positions={positions as [number, number][]} pathOptions={{ color: '#ff765e', weight: 4 }} />}{day.stops.map(stop => <Marker key={stop.place.id} position={[stop.place.location.lat, stop.place.location.lon]}><Popup><b>{stop.order}. {stop.place.name}</b><br />{stop.place.source}</Popup></Marker>)}</MapContainer>}</div><p className="px-4 py-3 text-xs text-slate-500">Route source: {trip.route.source}. {trip.route.verified ? 'Provider-supplied route data' : 'No live transit distance is claimed; use the map link for current details.'}</p></div>
+        <div className="grid grid-cols-3 gap-3">{[[trip.route.distance_km !== undefined ? `${trip.route.distance_km} km` : 'Open map', 'road distance, one way'], [trip.route.duration_minutes !== undefined ? `${trip.route.duration_minutes} min` : 'Check provider', 'route time'], [`${trip.currency} ${budgetRemaining.toLocaleString()}`, 'budget remaining']].map(([value, label]) => <div key={label} className="rounded-2xl bg-ink p-4 text-white"><div className="text-lg font-black">{value}</div><div className="mt-1 text-xs text-white/65">{label}</div></div>)}</div>
+        <div className="overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm"><div className="h-[340px]"><MapContainer center={center} zoom={11} className="h-full w-full" scrollWheelZoom={false}><RouteViewport positions={positions} fallback={center} /><TileLayer attribution="&copy; OpenStreetMap contributors" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />{positions.length > 1 && <Polyline positions={positions} pathOptions={{ color: '#ff765e', weight: 4 }} />}<Marker position={[trip.origin.lat, trip.origin.lon]}><Popup><b>Start: {trip.origin.label}</b></Popup></Marker>{trip.itinerary.flatMap(item => item.stops).map(stop => <Marker key={stop.place.id} position={[stop.place.location.lat, stop.place.location.lon]}><Popup><b>{stop.order}. {stop.place.name}</b><br />{stop.place.source}</Popup></Marker>)}</MapContainer></div><p className="px-4 py-3 text-xs text-slate-500">Route source: {trip.route.source}. {trip.route.verified ? 'Provider-supplied road route; the map is fitted to the full journey.' : 'No live transit distance is claimed; use the map link for current details.'}</p></div>
         <div className="rounded-3xl bg-white p-5 shadow-sm"><h3 className="font-black">Replan with new constraints</h3><p className="mt-1 text-sm text-slate-500">Try “make it more nature-focused”, “one stop is unavailable”, or revise the budget.</p><div className="mt-3 flex gap-2"><input className="field mt-0" value={change} onChange={e => setChange(e.target.value)} placeholder="What changed?" /><button disabled={loading || !change.trim()} onClick={replan} className="rounded-xl bg-moss px-4 text-sm font-bold text-white disabled:opacity-50">Replan</button></div></div>
       </div>
       <div className="space-y-5">
         <div className="rounded-3xl bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><h3 className="font-black">{day.title}</h3><span className="text-xs font-bold text-slate-500">{day.date}</span></div>{day.stops.length ? <ol className="mt-4 space-y-3">{day.stops.map(stop => <li key={stop.place.id} className="relative rounded-2xl border border-slate-100 p-4"><span className="absolute -left-2 top-4 grid h-6 w-6 place-items-center rounded-full bg-coral text-xs font-black text-white">{stop.order}</span><div className="ml-3"><div className="flex gap-2"><h4 className="font-bold">{stop.place.name}</h4>{!stop.place.verified && <span className="text-xs text-amber-700">Verify</span>}</div><p className="mt-1 text-sm text-slate-600">{stop.arrival_time}-{stop.departure_time} · {stop.visit_minutes} min</p><p className="mt-2 text-xs leading-5 text-slate-500">{stop.reason}</p>{stop.place.opening_hours && <p className="mt-1 text-xs">Hours: {stop.place.opening_hours} ({stop.place.source})</p>}{stop.place.booking_url ? <a className="mt-2 inline-block text-xs font-bold text-moss underline" href={stop.place.booking_url} target="_blank" rel="noreferrer">Official ticket link</a> : stop.place.official_url && <a className="mt-2 inline-block text-xs font-bold text-moss underline" href={stop.place.official_url} target="_blank" rel="noreferrer">Official site</a>}</div></li>)}</ol> : <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">No stop fits the time constraints. Adjust the form and try again.</p>}<p className="mt-4 text-xs text-slate-500">{day.meal_breaks[0]} Includes {day.buffer_minutes} minutes of buffer.</p></div>
+        {trip.itinerary.slice(1).map(item => <DayPlan key={item.date} day={item} />)}
         <TransitSchedule trip={trip} />
         <BookingOptions trip={trip} />
         <AccommodationOptions trip={trip} />
@@ -110,6 +121,10 @@ function Results({ trip, loading, change, setChange, replan }: { trip: TripPlan;
       </div>
     </div>
   </section>
+}
+
+function DayPlan({ day }: { day: TripPlan['itinerary'][number] }) {
+  return <div className="rounded-3xl bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><h3 className="font-black">{day.title}</h3><span className="text-xs font-bold text-slate-500">{day.date}</span></div>{day.stops.length ? <ol className="mt-4 space-y-3">{day.stops.map(stop => <li key={stop.place.id} className="relative rounded-2xl border border-slate-100 p-4"><span className="absolute -left-2 top-4 grid h-6 w-6 place-items-center rounded-full bg-coral text-xs font-black text-white">{stop.order}</span><div className="ml-3"><div className="flex gap-2"><h4 className="font-bold">{stop.place.name}</h4>{!stop.place.verified && <span className="text-xs text-amber-700">Verify</span>}</div><p className="mt-1 text-sm text-slate-600">{stop.arrival_time} to {stop.departure_time} · {stop.visit_minutes} min</p><p className="mt-2 text-xs leading-5 text-slate-500">{stop.reason}</p>{stop.place.opening_hours && <p className="mt-1 text-xs">Hours: {stop.place.opening_hours} ({stop.place.source})</p>}{stop.place.official_url && <a className="mt-2 inline-block text-xs font-bold text-moss underline" href={stop.place.official_url} target="_blank" rel="noreferrer">{stop.place.source.includes('OpenStreetMap') ? 'View on OpenStreetMap' : 'Official site'}</a>}</div></li>)}</ol> : <p className="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800">No stop fits the selected travel time. Try a later return time or a shorter route.</p>}<p className="mt-4 text-xs text-slate-500">{day.meal_breaks[0]} Includes {day.buffer_minutes} minutes of buffer.</p></div>
 }
 
 function formatProviderTime(value?: string) {

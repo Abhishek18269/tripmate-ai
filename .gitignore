@@ -9,6 +9,7 @@ frontend/dist/
 .pytest_cache/
 *.tsbuildinfo
 .npm-cache/
+.railway-client/
 frontend/vite.config.js
 frontend/vite.config.d.ts
 

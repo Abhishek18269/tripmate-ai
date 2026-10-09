@@ -39,6 +39,7 @@ def test_health_and_trip_lifecycle():
         assert trip["ticket_booking_options"]
         assert trip["accommodation_suggestions"]
         assert any(option["provider"] == "IRCTC" for option in trip["ticket_booking_options"])
+        assert any(stay["id"] == "booking-com-hotels" for stay in trip["accommodation_suggestions"])
         assert "Demo mode is on" in trip["warnings"][0]
 
         fetched = client.get(f"/api/trips/{trip['id']}")

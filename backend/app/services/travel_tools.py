@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -95,6 +96,41 @@ def _maps_directions_url(origin: str, destination: str, mode: TransportMode) -> 
     return (
         "https://www.google.com/maps/dir/?api=1"
         f"&origin={quote_plus(origin)}&destination={quote_plus(destination)}{mode_part}"
+    )
+
+
+def _maps_point_directions_url(origin: GeoPoint, destination: GeoPoint, mode: TransportMode) -> str:
+    """Google Maps route page pinned to the geocoded locations, not text guesses."""
+    return _maps_directions_url(
+        f"{origin.lat:.6f},{origin.lon:.6f}", f"{destination.lat:.6f},{destination.lon:.6f}", mode
+    )
+
+
+def _redbus_route_url(origin: str, destination: str, journey_date: date) -> str:
+    def slug(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    return (
+        f"https://www.redbus.in/bus-tickets/{slug(origin)}-to-{slug(destination)}"
+        f"?onward={journey_date.strftime('%d-%b-%Y')}"
+    )
+
+
+def _booking_com_search_url(destination: str, request: TripRequest) -> str:
+    checkin = request.departure_date
+    checkout = request.return_date or checkin
+    if checkout <= checkin:
+        checkout = checkin + timedelta(days=1)
+    return (
+        "https://www.booking.com/searchresults.html?"
+        f"ss={quote_plus(destination)}&checkin={checkin.isoformat()}&checkout={checkout.isoformat()}"
+        f"&group_adults={request.travelers}&no_rooms=1&group_children=0"
+    )
+
+
+def _google_hotels_url(destination: str, request: TripRequest) -> str:
+    return _maps_search_url(
+        f"hotels in {destination} check in {request.departure_date.isoformat()} "
+        f"for {request.travelers} guests"
     )
 
 
@@ -294,7 +330,32 @@ class TravelTools:
             self.events.append(ToolEvent(tool="accommodation", status="fallback", detail="Live accommodation lookup failed; generic search links supplied instead."))
             return _demo_accommodations(center, destination)
 
-    def ticket_booking_options(self, request: TripRequest, route: RouteSummary) -> list[BookingSuggestion]:
+    def hotel_booking_options(self, request: TripRequest, destination: GeoPoint) -> list[AccommodationSuggestion]:
+        """Date/traveller-aware hand-offs to hotel booking search pages.
+
+        These links deliberately start a provider search; they do not claim a
+        room, rate, or cancellation policy until the traveller sees it on the
+        provider's page.
+        """
+        stay_dates = f"{request.departure_date.isoformat()} to {(request.return_date or request.departure_date).isoformat()}"
+        return [
+            AccommodationSuggestion(
+                id="booking-com-hotels", name="Compare hotel rooms and prices", kind="hotel booking",
+                location=destination,
+                description=f"Search {request.destination} for {request.travelers} guest(s), dates {stay_dates}. Choose a room and complete payment with Booking.com.",
+                booking_url=_booking_com_search_url(request.destination, request), booking_action="search",
+                source="Booking.com destination search", verified=True,
+            ),
+            AccommodationSuggestion(
+                id="google-hotels", name="Compare hotels on Google Maps", kind="hotel search",
+                location=destination,
+                description=f"Compare current hotel options around {request.destination}; verify total price, reviews, and cancellation terms before payment.",
+                booking_url=_google_hotels_url(request.destination, request), booking_action="search",
+                source="Google Maps hotel search", verified=True,
+            ),
+        ]
+
+    def ticket_booking_options(self, request: TripRequest, route: RouteSummary, origin: GeoPoint, destination: GeoPoint) -> list[BookingSuggestion]:
         requested_departure = f"{request.departure_date.isoformat()} at {request.preferred_start_time.strftime('%H:%M')}"
         schedule_status = (
             f"{len(route.transit_segments)} live provider timetable segment(s) are shown above."
@@ -303,9 +364,9 @@ class TravelTools:
         )
         options = [
             BookingSuggestion(
-                id="route-directions", title="Open live route options", provider="Google Maps",
-                category="travel_search", url=_maps_directions_url(request.origin, request.destination, request.transport_mode),
-                description=f"View the current map route and alternatives for {requested_departure}. This does not purchase a ticket.",
+                id="map-distance", title="Verify exact route in Google Maps", provider="Google Maps",
+                category="travel_search", url=_maps_point_directions_url(origin, destination, request.transport_mode),
+                description=f"Opens Google Maps using the actual geocoded start and destination points for {requested_departure}. Check its current distance, route, traffic, and alternatives.",
                 source="Google Maps URL", verified=True,
             )
         ]
@@ -314,14 +375,14 @@ class TravelTools:
             options.append(BookingSuggestion(
                 id="irctc", title="Search Indian Railways tickets", provider="IRCTC",
                 category="official_ticket", url="https://www.irctc.co.in/nget/train-search",
-                description=f"Official Indian Railways reservation search. {schedule_status} Confirm availability, fare, class, and booking conditions before payment.",
+                description=f"Journey: {request.origin} to {request.destination}, {requested_departure}, {request.travelers} traveller(s). {schedule_status} Enter station codes to check availability, fare, class, and book securely.",
                 source="IRCTC official booking site", verified=True,
             ))
         if is_india_trip and request.transport_mode == TransportMode.bus:
             options.append(BookingSuggestion(
                 id="redbus", title="Search bus tickets", provider="redBus",
-                category="travel_search", url="https://www.redbus.in/",
-                description=f"Search buses for {request.origin} to {request.destination}. {schedule_status}",
+                category="travel_search", url=_redbus_route_url(request.origin, request.destination, request.departure_date),
+                description=f"Journey: {request.origin} to {request.destination}, {requested_departure}, {request.travelers} traveller(s). {schedule_status} Compare boarding points, seats, fares, and book on redBus.",
                 source="redBus booking search", verified=True,
             ))
         if request.transport_mode in {TransportMode.bus, TransportMode.transit, TransportMode.train}:

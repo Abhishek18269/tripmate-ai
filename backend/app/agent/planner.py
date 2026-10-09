@@ -24,6 +24,9 @@ class TripPlanningAgent:
         candidates, accommodations, route, weather = await asyncio.gather(
             places_task, accommodations_task, route_task, weather_task
         )
+        # Put actionable, date-aware hotel search options ahead of individual
+        # OpenStreetMap properties so the traveller can book immediately.
+        accommodations = [*tools.hotel_booking_options(request, destination), *accommodations[:6]]
 
         if replan_context:
             candidates = [p for p in candidates if p.id not in set(replan_context.unavailable_place_ids)]
@@ -61,7 +64,7 @@ class TripPlanningAgent:
             request=request, origin=origin, destination=destination,
             itinerary=itinerary,
             route=route, cost_items=costs, total_cost=total_cost, currency=request.currency,
-            ticket_booking_options=tools.ticket_booking_options(request, route),
+            ticket_booking_options=tools.ticket_booking_options(request, route, origin, destination),
             accommodation_suggestions=accommodations,
             warnings=warnings, weather=weather, tool_events=tools.events, ai_mode=ai_mode,
         )
